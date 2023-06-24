@@ -71,7 +71,7 @@ The SerialMouseBlaster PCB connects the level-shifted RTS to the Pico's GPIO 6, 
 - `-DPICO_VOLT` to set the core voltage. Accepted values can be found in `<pico-sdk>/src/rp2_common/hardware_vreg/include/hardware/vreg.h`. For example: `VREG_VOLTAGE_0_85` for 0.85V, `VREG_VOLTAGE_1_00` for 1.00v.
 - `-DPICO_LED` `0` or `1`. If set to 0 disables the LEDs completely. The default consumes very little power, so overriding it is not very useful.
 - `-DUSB_POLL_PERIOD` controls the poll period of the USB mouse. The default is 25ms which is 40Hz.
-- `-DENABLE_SERIAL_DBG` `1` or `0`. Setting it to `1` enables serial debug output using the SerialMouseBlaster's debug output (connected to the Pico's pins 1 to 3).
+- `-DENABLE_SERIAL_DBG` `1` or `0`. Setting it to `1` enables serial debug output using the SerialMouseBlaster's debug output (connected to the Pico's pins 1 to 3)
 
 
 # How to load the firmware
@@ -114,21 +114,30 @@ Female connector looking at the holes:
 
 # Raspberry Pi Pico's current consumption at 5V
 
-We set the core voltage with `vreg_set_voltage()` and the clock with `set_sys_clock_khz()`.
+We set the core voltage with `vreg_set_voltage()`, and the individual clocks with `clk_configure()` (see the implementation of `set_sys_clock_48mhz()`).
 The default core voltage is 1.10V.
 
-Freq (MHz) | Core (V)    | Current (mA)
------------|-------------|-------------
-125        |  1.10       | 19.0
-125        |  1.00       | 17.7
- 48        |  1.10       | 10.6
- 48        |  1.00       |  9.7
- 48        |  0.90       |  8.9
- 48*       |  1.10       |  8.9
- 48*       |  1.00       |  8.1
- 48*       |  0.90       |  7.4
+clk_usb must hast to be at 48MHz, but `clk_sys` can work at much lower frequencies. However, when `clk_sys` is much slower then `clk_usb` the connected USB devices no longer work. The slowest I could get `clk_sys` to operate at while USB was still working was `41.8MHz`.
+This is unfortunate, because running `clk_sys` out of `pll_usb` with a divider of 4, at `12MHz`, consumes only 3mA.
 
-(*) set_sys_clock_48mhz() which uses only the USB PLL.
+Stopping `clk_rtc` and `clk_adc` save about 0.1mA.
+
+
+clk_sys(MHz) | pll_sys(MHz)  | pll_sys      | Core (V)    | Current (mA) 
+-------------|---------------|--------------|-------------|--------------
+125,pll_sys  | 125, VCO=1500 | 48, VCO=1440 |  1.10       | 19.0         
+125,pll_sys  | 125, VCO=1500 | 48, VCO=1440 |  1.00       | 17.7         
+ 48,pll_sys  | 125, VCO=1500 | 48, VCO=1440 |  1.10       | 10.6         
+ 48,pll_sys  | 125, VCO=1500 | 48, VCO=1440 |  1.00       |  9.7         
+ 48,pll_sys  | 125, VCO=1500 | 48, VCO=1440 |  0.90       |  8.9         
+ 41.8,pll_usb| 41.6, VCO=750 | 48, VCO=768  |  0.90       |  6.3         
+ 48,pll_usb  |     Disabled  | 48, VCO=1440 |  1.10       |  8.9         
+ 48,pll_usb  |     Disabled  | 48, VCO=1440 |  1.00       |  8.1         
+ 48,pll_usb  |     Disabled  | 48, VCO=1440 |  0.90       |  7.4         
+ 48,pll_usb  |     Disabled  | 48, VCO=768  |  0.90       |  6.05         
+ 48*,pll_usb |     Disabled  | 48, VCO=768  |  0.90       |  5.85        
+
+(*) clk_peri running at 12MHz off xosc
 
 The Default LED consumes about 2mA.
 

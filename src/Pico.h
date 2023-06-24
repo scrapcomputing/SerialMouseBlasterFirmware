@@ -68,7 +68,7 @@ public:
        std::optional<vreg_voltage> Voltage = std::nullopt);
   /// Sleep for \p ms but also lower frequencies to use less power.
   /// NOTE: This is for testing and is not currently in use.
-  void lowPwrSleep_ms(uint32_t ms);
+  void lowpwrsleep_ms(uint32_t ms);
   /// Create a uart instance owned by the Pico object and returns a raw pointer
   /// to it.
   Uart *createUart(Uart::Instance Instance, uint32_t UartGPIO,

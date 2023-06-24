@@ -16,9 +16,10 @@
 
 #include "Pico.h"
 #include "Utils.h"
+#include "hardware/pll.h"
+#include "hardware/structs/rosc.h"
 #include "hardware/structs/scb.h"
 #include <iomanip>
-#include "hardware/pll.h"
 
 #ifndef NDEBUG
 static uint32_t AlreadySetMask = 0u;
@@ -46,19 +47,70 @@ void PinRange::dump(std::ostream &OS) const {
 
 void PinRange::dump() const { dump(std::cerr); }
 
+static uint32_t my_set_sys_clock(uint32_t vco_freq, uint32_t post_div1,
+                             uint32_t post_div2) {
+  clock_configure(clk_sys, CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,
+                  CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB, 48 * MHZ,
+                  48 * MHZ);
+  pll_init(pll_sys, 1, vco_freq, post_div1, post_div2);
+  uint32_t freq = vco_freq / (post_div1 * post_div2);
+  // CLK SYS = PLL SYS (125MHz) / 1 = 125MHz
+  clock_configure(clk_sys, CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,
+                  CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS, freq, freq);
+  return freq;
+}
+
+// Thse rosc_* functions are taken from pico-extras.
+inline static void rosc_clear_bad_write(void) {
+    hw_clear_bits(&rosc_hw->status, ROSC_STATUS_BADWRITE_BITS);
+}
+
+inline static bool rosc_write_okay(void) {
+    return !(rosc_hw->status & ROSC_STATUS_BADWRITE_BITS);
+}
+
+inline static void rosc_write(io_rw_32 *addr, uint32_t value) {
+    rosc_clear_bad_write();
+    assert(rosc_write_okay());
+    *addr = value;
+    assert(rosc_write_okay());
+};
+
+static void rosc_disable(void) {
+  uint32_t tmp = rosc_hw->ctrl;
+  tmp &= (~ROSC_CTRL_ENABLE_BITS);
+  tmp |= (ROSC_CTRL_ENABLE_VALUE_DISABLE << ROSC_CTRL_ENABLE_LSB);
+  rosc_write(&rosc_hw->ctrl, tmp);
+  // // Wait for stable to go away
+  // while (rosc_hw->status & ROSC_STATUS_STABLE_BITS)
+  //   ;
+}
+
+
 void Pico::setFreqAndVoltage() {
-  // Set the voltage if required.
-  if (Voltage)
-    vreg_set_voltage(*Voltage);
+  // This sets the system clocks/plls for the lowest power consumption.
   if (Frequency == 0) {
+    // Stop unused clock generators. This saves about 0.1mA.
     clock_stop(clk_adc);
     clock_stop(clk_rtc);
-    // rosc_disable();
+    clock_stop(clk_gpout0);
+    clock_stop(clk_gpout1);
+    clock_stop(clk_gpout2);
+    clock_stop(clk_gpout3);
 
-    // The following code is taken from `set_sys_clock_48mhz()`.
-    // I am inlining it here in case we tune it even more.
+    // Set PLL_USB to use a low VCO frequency to save power.
+    // ./src/rp2_common/hardware_clocks/scripts/vcocalc.py -l --input 48 --vco-max 1000 48
+    // Requested: 48.0 MHz
+    // Achieved: 48.0 MHz
+    // REFDIV: 1
+    // FBDIV: 16 (VCO = 768.0 MHz)
+    // PD1: 4
+    // PD2: 4
+    pll_init(pll_usb, 1, /*VCO=*/768 * MHZ, /*PD1=*/4, /*PD2=*/4);
 
-    // Set frequency to 48MHz by default. Lower than breaks USB.
+    // The following code is based on code taken from `set_sys_clock_48mhz()`.
+
+    // Set frequency to 48MHz by default. Lower than that breaks USB.
 
     // CLK_SYS from PLL_USB
     clock_configure(clk_sys,
@@ -74,12 +126,13 @@ void Pico::setFreqAndVoltage() {
                     12 * MHZ,
                     12 * MHZ);
 
-    // CLK peri from PLL_USB
+    // CLK peri from XOSC and run at 12MHz
     clock_configure(clk_peri,
                     0,
-                    CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
-                    48 * MHZ,
-                    48 * MHZ);
+                    CLOCKS_CLK_ADC_CTRL_AUXSRC_VALUE_XOSC_CLKSRC,
+                    12 * MHZ,
+                    12 * MHZ);
+
     // CLK usb from PLL_USB
     clock_configure(clk_usb,
                     0,
@@ -89,10 +142,19 @@ void Pico::setFreqAndVoltage() {
 
     // We don't need PLL_SYS anymore
     pll_deinit(pll_sys);
+
+    // Disabling rosc hangs the system, strange! I don't thing there is any
+    // clock generator running off it.
+    // rosc_disable();
+    // rosc_write(&rosc_hw->dormant, ROSC_DORMANT_VALUE_DORMANT);
   }
   else
     // Some over/underclocking if needed.
     set_sys_clock_khz(Frequency, true);
+
+  // Set the voltage if required.
+  if (Voltage)
+    vreg_set_voltage(*Voltage);
 }
 
 Pico::Pico(std::optional<uint32_t> WakeUpGPIO, uint32_t Frequency,
@@ -128,7 +190,7 @@ Pico::Pico(std::optional<uint32_t> WakeUpGPIO, uint32_t Frequency,
 }
 
 // WARNING: This is not working as expected! Do not use!
-void Pico::lowPwrSleep_ms(uint32_t ms) {
+void Pico::lowpwrsleep_ms(uint32_t ms) {
   // Make sure we send/receive any outstanding data because when the frequencies
   // are lower, UART may not work properly.
   if (Uart0)
@@ -142,26 +204,65 @@ void Pico::lowPwrSleep_ms(uint32_t ms) {
   // uint post_div1 = 7;
   // uint post_div2 = 7;        // 15.3MHZ
   // // Set the USB PLL to 15.3MHz
-  // pll_init(pll_usb, 1, vco_freq, post_div1, post_div2);
 
-  // Connect CLK_SYS to USB PLL and use a divider to get 15MHz out of 48MHz
-  clock_configure(clk_sys,
-                  CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,
-                  CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
-                  48 * MHZ,
-                  15 * MHZ);
+  // // Connect CLK_SYS to USB PLL and use a divider to get 20MHz out of 48MHz
+  // clock_configure(clk_sys, CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,
+  //                 CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB, 48 * MHZ,
+  //                 20 * MHZ);
+
+  // clock_configure(clk_sys,
+  //                 CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,
+  //                 CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,
+  //                 125 * MHZ,
+  //                 125 * MHZ);
+
+
+  // // Connect CLK_SYS to PLL_SYS which runs at 15MHz
+  // clock_configure(clk_sys, CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,
+  //                 CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS, 125 * MHZ,
+  //                 15 * MHZ);
+
   // Check the frequency:
   // auto freq_peri = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_PERI);
+
+  // 20MHz
+  // set_sys_clock_pll(980 * MHZ, 7, 7);
+
+// ./src/rp2_common/hardware_clocks/scripts/vcocalc.py -l --input 125 --vco-max 750 40
+// Requested: 40.0 MHz
+// Achieved: 41.666666666666664 MHz
+// REFDIV: 3
+// FBDIV: 18 (VCO = 750.0 MHz)
+// PD1: 6
+// PD2: 3
+  // uint32_t freq = my_set_sys_clock(750 * MHZ, 6, 3);
 
   // Sleep
   sleep_ms(ms);
 
-  // Restore the CLK_SYS divider
-  clock_configure(clk_sys,
-                  CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,
-                  CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
-                  48 * MHZ,
-                  48 * MHZ);
+  // ./src/rp2_common/hardware_clocks/scripts/vcocalc.py -l --input 125 --vco-max 750 48
+  // Requested: 48.0 MHz
+  // Achieved: 46.875 MHz
+  // REFDIV: 3
+  // FBDIV: 18 (VCO = 750.0 MHz)
+  // PD1: 4
+  // PD2: 4
+  // freq = my_set_sys_clock(750 * MHZ, 4, 4);
+
+  // 48MHz
+  // set_sys_clock_pll(1200 * MHZ, 5, 5);
+
+  // // // Restore the CLK_SYS divider
+  // clock_configure(clk_sys,
+  //                 CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,
+  //                 CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,
+  //                 125 * MHZ,
+  //                 48 * MHZ);
+
+  // // Restore CLK_SYS from PLL_USB at 48MHz
+  // clock_configure(clk_sys, CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,
+  //                 CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB, 48 * MHZ,
+  //                 48 * MHZ);
 
   // // Restore USB PLL to 48MHz
   // vco_freq = 1440 * MHZ;
