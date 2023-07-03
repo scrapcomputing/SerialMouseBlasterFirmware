@@ -126,12 +126,14 @@ void Pico::setFreqAndVoltage() {
                     12 * MHZ,
                     12 * MHZ);
 
-    // CLK peri from XOSC and run at 12MHz
+    // CLK peri from PLL_USB and run at 48MHz
+    // NOTE: Running it off XOSC at 12MHz saves 0.2mA but UART does not
+    // seem to work properly
     clock_configure(clk_peri,
                     0,
-                    CLOCKS_CLK_ADC_CTRL_AUXSRC_VALUE_XOSC_CLKSRC,
-                    12 * MHZ,
-                    12 * MHZ);
+                    CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
+                    48 * MHZ,
+                    48 * MHZ);
 
     // CLK usb from PLL_USB
     clock_configure(clk_usb,

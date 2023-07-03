@@ -135,9 +135,6 @@ clk_sys(MHz) | pll_sys(MHz)  | pll_sys      | Core (V)    | Current (mA)
  48,pll_usb  |     Disabled  | 48, VCO=1440 |  1.00       |  8.1         
  48,pll_usb  |     Disabled  | 48, VCO=1440 |  0.90       |  7.4         
  48,pll_usb  |     Disabled  | 48, VCO=768  |  0.90       |  6.05         
- 48*,pll_usb |     Disabled  | 48, VCO=768  |  0.90       |  5.85        
 
-(*) clk_peri running at 12MHz off xosc
-
-The Default LED consumes about 2mA.
+Pico's LED consumes about 2mA when always on.
 
